@@ -1,0 +1,6 @@
+CLAUDE.md
+backup/
+command.log
+from_here.txt
+__pycache__/
+*.pyc
