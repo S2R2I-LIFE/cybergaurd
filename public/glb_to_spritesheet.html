@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>GLB → Sprite Sheet</title>
+<style>
+  body { background: #111; color: #eee; font-family: monospace; padding: 24px; }
+  h1 { color: #0cf; margin-bottom: 4px; }
+  p.sub { color: #888; margin-top: 0; font-size: 13px; }
+  .controls { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin: 16px 0; }
+  label { color: #aaa; font-size: 13px; }
+  input[type=file] { color: #eee; }
+  input[type=number] { background: #222; border: 1px solid #444; color: #eee;
+    padding: 4px 8px; width: 70px; border-radius: 4px; }
+  button { background: #0cf; color: #000; border: none; padding: 8px 18px;
+    cursor: pointer; border-radius: 4px; font-weight: bold; font-size: 13px; }
+  button:disabled { background: #444; color: #888; cursor: not-allowed; }
+  #status { margin: 8px 0; font-size: 13px; color: #fc0; min-height: 18px; }
+  #preview-wrap { margin-top: 16px; }
+  #preview-wrap h3 { color: #888; font-size: 12px; margin-bottom: 6px; }
+  canvas { display: block; border: 1px solid #333; image-rendering: pixelated;
+    background: repeating-conic-gradient(#444 0% 25%, #222 0% 50%) 0 0 / 16px 16px; }
+  #sheet-canvas { margin-top: 12px; }
+  .frame-row { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 8px; }
+  .frame-row canvas { border: 1px solid #333; }
+  #dl-btn { margin-top: 12px; display: none; }
+</style>
+</head>
+<body>
+
+<h1>GLB → Sprite Sheet</h1>
+<p class="sub">Renders a GLB model through 360° and exports a horizontal sprite strip PNG.</p>
+
+<div class="controls">
+  <div>
+    <label>GLB file: </label><br>
+    <input type="file" id="glb-input" accept=".glb,.gltf">
+  </div>
+  <div>
+    <label>Frames:</label><br>
+    <input type="number" id="frame-count" value="16" min="4" max="64" step="4">
+  </div>
+  <div>
+    <label>Frame size (px):</label><br>
+    <input type="number" id="frame-size" value="128" min="32" max="512" step="32">
+  </div>
+  <div style="align-self:flex-end">
+    <button id="render-btn" disabled>Render</button>
+  </div>
+</div>
+
+<div id="status">Load a GLB file to begin.</div>
+
+<div id="preview-wrap" style="display:none">
+  <h3>SPRITE SHEET (download below)</h3>
+  <canvas id="sheet-canvas"></canvas>
+  <div class="frame-row" id="frame-row"></div>
+  <button id="dl-btn">⬇ Download sprite_sheet.png</button>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.162.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.162.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+const glbInput   = document.getElementById('glb-input');
+const renderBtn  = document.getElementById('render-btn');
+const statusEl   = document.getElementById('status');
+const previewWrap= document.getElementById('preview-wrap');
+const sheetCanvas= document.getElementById('sheet-canvas');
+const frameRow   = document.getElementById('frame-row');
+const dlBtn      = document.getElementById('dl-btn');
+const frameCount = document.getElementById('frame-count');
+const frameSizeEl= document.getElementById('frame-size');
+
+let glbArrayBuffer = null;
+
+glbInput.addEventListener('change', async e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  statusEl.textContent = `Loaded: ${file.name} (${(file.size/1024).toFixed(1)} KB)`;
+  glbArrayBuffer = await file.arrayBuffer();
+  renderBtn.disabled = false;
+});
+
+renderBtn.addEventListener('click', () => {
+  if (!glbArrayBuffer) return;
+  renderBtn.disabled = true;
+  statusEl.textContent = 'Rendering…';
+  setTimeout(() => doRender(), 0); // yield to repaint
+});
+
+dlBtn.addEventListener('click', () => {
+  const link = document.createElement('a');
+  link.download = 'sprite_sheet.png';
+  link.href = sheetCanvas.toDataURL('image/png');
+  link.click();
+});
+
+async function doRender() {
+  const N    = Math.max(4, parseInt(frameCount.value) || 16);
+  const SIZE = Math.max(32, parseInt(frameSizeEl.value) || 128);
+
+  // --- Offscreen WebGL renderer ---
+  // Use magenta chroma-key bg: model is gray/white so no collision with FF00FF
+  const renderer = new THREE.WebGLRenderer({ antialias: false, alpha: false, preserveDrawingBuffer: true });
+  renderer.setSize(SIZE, SIZE);
+  renderer.setClearColor(0xFF00FF, 1);
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+  const scene  = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 1000);
+
+  // Lights
+  const amb  = new THREE.AmbientLight(0xffffff, 0.6);
+  const dir  = new THREE.DirectionalLight(0xffffff, 1.2);
+  dir.position.set(2, 3, 2);
+  scene.add(amb, dir);
+
+  // Load GLB
+  statusEl.textContent = 'Parsing GLB…';
+  const loader = new GLTFLoader();
+  let gltf;
+  try {
+    gltf = await new Promise((res, rej) =>
+      loader.parse(glbArrayBuffer.slice(0), '', res, rej)
+    );
+  } catch(err) {
+    statusEl.textContent = 'Error parsing GLB: ' + err.message;
+    renderer.dispose();
+    renderBtn.disabled = false;
+    return;
+  }
+
+  const model = gltf.scene;
+  scene.add(model);
+
+  // Auto-fit camera to bounding box
+  const box    = new THREE.Box3().setFromObject(model);
+  const center = box.getCenter(new THREE.Vector3());
+  const sphere = box.getBoundingSphere(new THREE.Sphere());
+  const radius = sphere.radius;
+
+  model.position.sub(center); // center model at origin
+
+  const fovRad = camera.fov * Math.PI / 180;
+  const dist   = (radius * 1.4) / Math.tan(fovRad / 2);
+  camera.position.set(dist * 0.35, radius * 0.7, dist * 0.85);
+  camera.lookAt(0, 0, 0);
+
+  // Pivot group for Y-rotation
+  const pivot = new THREE.Group();
+  pivot.add(model);
+  scene.add(pivot);
+
+  // Render frames
+  const frameCanvases = [];
+  frameRow.innerHTML = '';
+
+  for (let i = 0; i < N; i++) {
+    const angle = (i / N) * Math.PI * 2;
+    pivot.rotation.y = angle;
+
+    renderer.render(scene, camera);
+
+    // Read pixels from WebGL (bottom-left origin → flip Y)
+    const buf = new Uint8Array(SIZE * SIZE * 4);
+    renderer.getContext().readPixels(
+      0, 0, SIZE, SIZE,
+      renderer.getContext().RGBA,
+      renderer.getContext().UNSIGNED_BYTE,
+      buf
+    );
+
+    // Flip Y + chroma-key magenta → transparent
+    const fc = document.createElement('canvas');
+    fc.width = fc.height = SIZE;
+    const fctx = fc.getContext('2d');
+    const img  = fctx.createImageData(SIZE, SIZE);
+    for (let row = 0; row < SIZE; row++) {
+      const src = (SIZE - 1 - row) * SIZE * 4;
+      for (let col = 0; col < SIZE; col++) {
+        const s = src + col * 4;
+        const d = (row * SIZE + col) * 4;
+        const r = buf[s], g = buf[s+1], b = buf[s+2];
+        // kill magenta background (r>180 && b>180 && g<80)
+        if (r > 180 && b > 180 && g < 80) {
+          img.data[d] = img.data[d+1] = img.data[d+2] = img.data[d+3] = 0;
+        } else {
+          img.data[d]=r; img.data[d+1]=g; img.data[d+2]=b; img.data[d+3]=255;
+        }
+      }
+    }
+    fctx.putImageData(img, 0, 0);
+    frameCanvases.push(fc);
+
+    // Tiny thumb
+    const thumb = document.createElement('canvas');
+    thumb.width = thumb.height = Math.min(SIZE, 64);
+    thumb.title = `Frame ${i}`;
+    thumb.getContext('2d').drawImage(fc, 0, 0, thumb.width, thumb.height);
+    frameRow.appendChild(thumb);
+
+    statusEl.textContent = `Rendering frame ${i+1}/${N}…`;
+    // Yield every 4 frames so browser stays responsive
+    if (i % 4 === 3) await new Promise(r => setTimeout(r, 0));
+  }
+
+  // Assemble sprite sheet (horizontal strip)
+  sheetCanvas.width  = SIZE * N;
+  sheetCanvas.height = SIZE;
+  const sctx = sheetCanvas.getContext('2d');
+  sctx.clearRect(0, 0, sheetCanvas.width, sheetCanvas.height);
+  frameCanvases.forEach((fc, i) => sctx.drawImage(fc, i * SIZE, 0));
+
+  // Scale preview down if too wide
+  sheetCanvas.style.width  = Math.min(SIZE * N, 900) + 'px';
+  sheetCanvas.style.height = 'auto';
+
+  renderer.dispose();
+  previewWrap.style.display = 'block';
+  dlBtn.style.display = 'inline-block';
+  statusEl.textContent = `Done — ${N} frames × ${SIZE}px. Sheet: ${SIZE*N}×${SIZE}px.`;
+  renderBtn.disabled = false;
+}
+</script>
+</body>
+</html>

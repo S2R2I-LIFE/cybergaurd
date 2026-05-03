@@ -1,6 +1,9 @@
 CLAUDE.md
+**/CLAUDE.md
 backup/
 command.log
 from_here.txt
 __pycache__/
 *.pyc
+FloorDoom/*.png
+FloorDoom/output/

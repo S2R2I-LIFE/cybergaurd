@@ -4,42 +4,53 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**CyberGuard: The NIST Dungeon** — a browser-based 2.5D educational game (DOOM-style raycasting, vanilla JS) that teaches NIST cybersecurity frameworks (CSF 2.0, AI RMF 1.0, SP 800-53, SP 800-37) to university students. Designed for Professor Snyder for undergraduate/graduate cybersecurity courses.
+**CyberGuard: The NIST Dungeon** — a browser-based 2.5D educational game (DOOM-style raycasting, vanilla JS) teaching NIST CSF 2.0, AI RMF 1.0, SP 800-53, and SP 800-37 to university students (Professor Snyder's courses at UAlbany).
 
-**Status:** Specification phase. The entire design lives in `cybergaurd.json` — a single orchestration document with embedded Markdown sections for each agent. No implementation code exists yet.
+**Status:** Implemented. Playable game lives in `cyberguard/`. Open `cyberguard/index.html` directly in a browser — no build step, no server required.
 
-## Source of Truth
+The original spec lives in `cybergaurd.json` (note typo in filename) and `spec.md`. The `backup/` directory contains historical snapshots; work from `cyberguard/` only.
 
-`cybergaurd.json` is the master spec. It contains 7 embedded Markdown sections:
+## Architecture
 
-| Section | Contents |
+All game code is vanilla JS loaded via `<script>` tags in `index.html` in this order (dependency order matters):
+
+| File | Role |
 |---|---|
-| `MASTER_ORCHESTRATOR.md` | Agent execution order, handoff rules, output artifacts |
-| `GAME_DESIGN.md` | Map layout, level progression, game mechanics |
-| `POLICY_CONTENT.md` | Policy card schema (30+ cards), scenario templates (15+) |
-| `GAME_ENGINE.md` | Raycasting engine spec, state management, event system |
-| `UI_DESIGN.md` | Color system (IDENTIFY=blue, PROTECT=green, DETECT=orange, AI RMF=purple), HUD, components |
-| `QA_VALIDATION.md` | Validation checklist, governance veto protocol |
-| `DEPLOYMENT.md` | Output file structure, deployment targets, instructor README |
+| `state.js` | Global constants and `GAME_STATE` object. Source of truth for roles, zone colors, level metadata, FT throw constants. |
+| `data/maps.js` | `MAPS` object — one 2D array per level. Cell types: `0`=floor `1`=wall `2`=exit door `3`=policy card `4`=scenario `5`=FT pickup. |
+| `data/policy_cards.js` | `POLICY_CARDS` array — 60+ cards, each with `card_id`, `function`, `level_num`, `rarity`, NIST refs. |
+| `data/scenarios.js` | `SCENARIOS` array — MCQ puzzles keyed by `level_num`. |
+| `data/npc_data.js` | NPC definitions (sprites, dialogue, behavior). |
+| `engine.js` | Raycasting renderer (800×500 canvas, 66° FOV, `ImageData` pixel writes). Procedural wall/floor/ceiling textures per zone. NPC sprite rendering. Game loop (`startEngine`). |
+| `mechanics.js` | `loadLevel`, player movement, collision, card/scenario pickup logic, FT newspaper throw mechanic, NPC AI. |
+| `ui_components.js` | All DOM overlays: HUD, briefing screen, scenario panel, codex, pause, certificate, NPC dialogue. |
 
-## Agent Orchestration Architecture
+## Key Constants (state.js)
 
-The spec defines a **7-agent sequential pipeline** where each agent receives prior agents' artifacts:
+- **Level order:** `lobby → level1_govern → level2_identify → level3_protect → level4_detect → level5_respond → level6_recover → boss_ai_rmf`
+- **Zone colors:** LOBBY=`#888`, GOVERN=`#FFD700`, IDENTIFY=`#1E90FF`, PROTECT=`#00AA44`, DETECT=`#FF8C00`, RESPOND=`#FF3333`, RECOVER=`#00CED1`, AI_RMF=`#9B30FF`
+- **Player roles:** `analyst` (specialty: DETECT/RESPOND), `auditor` (GOVERN/AI_RMF), `risk_manager` (IDENTIFY/PROTECT/RECOVER)
+- **FT mechanic:** `FT_STUN_DURATION=8s`, `FT_THROW_RANGE=7`, `FT_HALF_CONE=0.4rad`, `FT_PER_LEVEL=3`
 
+## Adding Content
+
+- **New policy card:** append to `POLICY_CARDS` in `data/policy_cards.js` with matching `level_num` (1–7).
+- **New scenario:** append to `SCENARIOS` in `data/scenarios.js` with matching `level_num`.
+- **New level map:** add entry to `MAPS` in `data/maps.js` and corresponding entry in `LEVEL_METADATA` and `LEVEL_ORDER` in `state.js`.
+- **New wall texture:** add zone branch to `generateZoneTexture()` in `engine.js`.
+
+## FloorDoom Tool
+
+`FloorDoom/` is a standalone Python utility that converts blueprint PNG images into JS tilemap arrays.
+
+```bash
+cd FloorDoom
+python3 main.py <image_path>
+# outputs: output/floor3.js, output/floor3.npy, output/floor3_preview.png
 ```
-AGT-01 WorldBuilder → AGT-02 PolicyScribe → AGT-03 GameMechanicEngineer
-→ AGT-04 UIRenderer → AGT-05 NarrativeDirector → AGT-06 QAValidator → AGT-07 DeploymentAgent
-```
 
-Each agent has a defined role, input dependencies, and output artifacts (e.g., `world_map.json`, `engine.js`, `style.css`, `qa_report.json`, `/dist/cyberguard_v1.0/`).
+Requires: numpy, PIL. Output `floor3.js` can be copy-pasted into `data/maps.js`.
 
-## Implementation Target
+## Deployment
 
-When built, the game is a **fully self-contained static site** (no backend, no external APIs):
-- HTML5 canvas raycasting renderer (~800×500px, 66° FOV)
-- Player roles: Security Analyst, AI Auditor, Risk Manager
-- Level flow: Lobby → IDENTIFY → PROTECT → DETECT → Boss (AI RMF)
-- Policy card inventory, scenario MCQ puzzles, knowledge-gate quizzes
-- Completion certificate with NIST mastery metrics
-- Target browsers: Chrome, Firefox, Safari, Edge; mobile-responsive (min 375px)
-- No build step — deploy as static files (GitHub Pages, Netlify, or direct HTML)
+Static files only. Copy `cyberguard/` to any host. GitHub Pages, Netlify, or direct `index.html` all work.
