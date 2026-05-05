@@ -13,7 +13,7 @@ Quick lookup for tuneable constants and state fields. File paths relative to `cy
 | `canvas_height` | 500 | Render canvas height in pixels |
 | `fov` | π/3 (~60°) | Horizontal field of view in radians |
 | `move_speed` | 3.5 | Player movement speed (units/sec) |
-| `turn_speed` | 2.8 | Keyboard turn speed (radians/sec) |
+| `turn_speed` | 2.0 | Keyboard turn speed (radians/sec) |
 | `player_radius` | 0.25 | Collision radius (fractions of a tile) |
 | `wall_height_scale` | 450 | Controls perceived ceiling height; higher = taller walls |
 | `minimap_scale` | 10 | Pixels per tile on the minimap overlay |
@@ -68,11 +68,14 @@ Object keyed by level ID. Each entry:
 ### ZONE_HINTS
 Maps zone ID → hint string shown when player touches a hint poster (cell 7).
 
+### TERM_HINT_TOKENS
+Array of `{ cmd, tip }` objects. Cycled through as player collects cell 10 hint tokens on the campus map. Add entries here when adding new terminal hint tokens to the map.
+
 ### GAME_STATE
 Runtime mutable state. Key sub-objects:
 | Path | Purpose |
 |---|---|
-| `GAME_STATE.screen` | Current UI mode: `briefing` `playing` `codex` `scenario` `campus_challenge` `terminal_challenge` `gameover` `certificate` `paused` `transition` |
+| `GAME_STATE.screen` | Current UI mode: `briefing` `playing` `codex` `scenario` `campus_challenge` `terminal_challenge` `subnet_challenge` `panel` `gameover` `certificate` `paused` `transition` |
 | `GAME_STATE.player.x/y` | Player world position |
 | `GAME_STATE.player.angle` | Facing direction in radians |
 | `GAME_STATE.player.role` | Selected role key (`analyst` etc.) |
@@ -87,13 +90,19 @@ Runtime mutable state. Key sub-objects:
 | `GAME_STATE.progress.score` | Cumulative score |
 | `GAME_STATE.progress.cards_collected` | Array of collected card IDs |
 | `GAME_STATE.progress.scenarios_completed` | Array of completed scenario IDs |
+| `GAME_STATE.progress.campus_completed` | Completed campus challenge IDs + `pen_X` penalty markers |
+| `GAME_STATE.progress.terminal_completed` | Completed terminal challenge IDs + `pen_X` penalty markers |
+| `GAME_STATE.progress.term_hints_collected` | Array of `"row_col"` keys for consumed hint tokens |
 | `GAME_STATE.boss.spawned` | Whether ARIA has been spawned |
 | `GAME_STATE.boss.defeated` | Whether ARIA has been beaten (unlocks exit) |
 | `GAME_STATE.boss.phase` | Current ARIA question phase (0–6) |
-| `GAME_STATE.progress.campus_completed` | Completed campus challenge IDs + `pen_X` penalty markers |
-| `GAME_STATE.progress.terminal_completed` | Completed terminal challenge IDs + `pen_X` penalty markers |
 | `GAME_STATE.active_campus_challenge` | Challenge object currently displayed in campus panel |
 | `GAME_STATE.active_terminal_challenge` | Challenge object currently displayed in terminal panel |
+| `GAME_STATE.active_terminal_challenge_pos` | `{row, col}` of the cell 9 that opened the terminal — used to restore if player quits |
+| `GAME_STATE.active_subnet_challenge` | Active Arista EOS challenge object (campus only): challenge data + `rack_id`, `phase`, `entered_ip`, `ip_valid` |
+| `GAME_STATE.subnet_close_time` | `performance.now()` timestamp — 400ms cooldown prevents immediate re-catch after dismissing rack terminal |
+| `GAME_STATE.panel_close_time` | `performance.now()` timestamp — 400ms cooldown prevents panel reopening when standing on cell 11 |
+| `GAME_STATE.panel_ips` | Campus-only: `{ left: [null\|{ip,valid}, ×3], right: [...×3] }` — tracks configured IPs per stairwell panel |
 | `GAME_STATE.decorations` | Array of `{x, y, cellType}` for wall-offset torch sprites |
 | `GAME_STATE.npcs` | Array of active NPC objects |
 
@@ -119,6 +128,8 @@ Per-cell-type size multiplier. NPCs default to 1.0.
 | 7 | 0.65 | Hint poster |
 | 8 | 0.60 | AP unit (campus level) |
 | 9 | 0.65 | PC workstation (campus level) |
+| 10 | 0.50 | Terminal hint token (`>_`) |
+| 11 | 0.55 | Stairwell access panel (campus level) |
 
 ### AP Spin Speed
 ```js
@@ -141,10 +152,10 @@ Lower = faster spin.
 ### placeDecorations
 Controls how many decorations spawn per level:
 ```js
-const torches = Math.min(14, Math.ceil(candidates.length * 0.10));  // max 14, ~10% of wall-adj tiles
-const posters  = Math.min(5,  Math.ceil(candidates.length * 0.04));  // max 5,  ~4%
+const torches = levelId === 'floordoom_level' ? 0 : Math.min(14, Math.ceil(candidates.length * 0.10));
+const posters  = Math.min(5, Math.ceil(candidates.length * 0.04));
 ```
-Torch world offset from wall: `0.18` (near wall) vs `0.82` (far wall). Currently 0.18/0.82 — closer = more wall-mounted.
+Torches are suppressed on the campus map. Torch world offset from wall: `0.18` (near wall) vs `0.82` (far wall).
 
 Ceiling lights are baked into `generateCeilTex()` as a tiling panel — one light per tile, evenly spaced. Color is zone-specific (gold=GOVERN, blue=IDENTIFY, etc.). Adjust `addLightPanel(r,g,b,w,h)` args per zone to change colour or panel size.
 
@@ -162,7 +173,9 @@ Ceiling lights are baked into `generateCeilTex()` as a tiling panel — one ligh
 | 6 | Torch | Visual only (world position from `GAME_STATE.decorations`) |
 | 7 | Hint poster | Shows zone hint toast on contact (5s cooldown) |
 | 8 | AP unit (campus) | Opens campus challenge panel on contact; animated sprite sheet |
-| 9 | PC workstation (campus) | Opens terminal challenge panel on contact; procedural PC sprite |
+| 9 | PC workstation (campus) | Opens terminal challenge panel on contact; restored to map if player quits without completing |
+| 10 | Terminal hint token (campus) | Consumed on contact; shows command hint toast; neon-green `>_` sprite |
+| 11 | Stairwell access panel (campus) | Opens `showPanelOverlay` on contact (400ms cooldown after dismiss); not consumed |
 
 ---
 
@@ -173,9 +186,7 @@ Linked to cell 8 (AP) pickups. Shuffled into `GAME_STATE.level.campus_challenge_
 ## data/terminal_challenges.js
 `TERMINAL_CHALLENGES` array. Each entry: `challenge_id` `task` `situation` `accepted_cmds[]` `hint` `fake_output` `explanation`.
 Linked to cell 9 (PC workstation) pickups. Points: **+200** correct, **−8% grade** first wrong attempt.
-State fields: `GAME_STATE.level.terminal_challenge_pool` (shuffled at load), `GAME_STATE.progress.terminal_completed`, `GAME_STATE.active_terminal_challenge`.
-
----
+Accepted commands matched case-insensitive, whitespace-normalized. Unknown commands (not handled by simulator) trigger the penalty; known-but-wrong commands show realistic simulator output with no penalty.
 
 ## data/maps.js + data/maps_floordoom.js
 Contains `MAPS` object — one 2D array per level ID. Edit these to change room layout.
@@ -183,12 +194,17 @@ Level IDs: `lobby` `level1_govern` `level2_identify` `level3_protect` `level4_de
 
 ## data/policy_cards.js
 `POLICY_CARDS` array. Each card: `card_id` `function` `level_num` `rarity` + NIST reference fields.
-`level_num` must match the level where the card should appear (1–7).
+`level_num` must match the level where the card should appear (1–7, or 8 for campus CAMPUS-zone cards).
 
 ## data/scenarios.js
 `SCENARIOS` array. Each scenario: `scenario_id` `level_num` `question` `options[]` `correct` `explanation`.
+All four options in each scenario are within ±10 chars of each other in length to prevent longest-answer bias.
+
+## data/subnet_challenges.js
+`SUBNET_CHALLENGES` array (campus-only, `level_num: 8`). Each entry: `challenge_id` `panel` (`left`/`right`) `slot` (0–2) `rack_label` `rogue_ip` (169.254.x.x APIPA) `situation` `subnet` `valid_range:[lo,hi]` `broadcast` `explanation`.
+Linked to RACK NPC spawns by `challenge_id`. One challenge per rack; 3 per panel side.
 
 ## data/npc_data.js
-- `NPC_TYPES` — display config per NPC type (label, icon, color, threat label)
-- `NPC_SPAWNS` — array of spawn definitions: `{level_num, type, x, y, patrol_points[], ghost, challenges[]}`
+- `NPC_TYPES` — display config per NPC type (label, icon, color, threat label). Includes `RACK` (campus rogue server rack).
+- `NPC_SPAWNS` — array of spawn definitions: `{level_num, type, x, y, patrol_points[], ghost, challenges[]}`. RACK entries also have `challenge_id`, `panel`, `slot`.
 - `ARIA_CHALLENGES` — 7-phase sequential MCQ for the final boss
